@@ -32,7 +32,7 @@ public class ProduitCsv {
         this.prix = prix;
     }
 
-    public double getStock() {
+    public int getStock() {
         return stock;
     }
 

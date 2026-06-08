@@ -1,4 +1,3 @@
--- src/main/resources/produits.csv
 reference,designation,prix,stock
 REF-001,Clavier mécanique,89.99,150
 REF-002,Souris ergonomique,45.00,320
