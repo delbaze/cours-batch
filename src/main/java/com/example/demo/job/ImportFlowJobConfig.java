@@ -4,9 +4,13 @@ import javax.sql.DataSource;
 
 import com.example.demo.model.Produit;
 import com.example.demo.model.ProduitCsv;
+import com.example.demo.model.StockCsv;
 import org.springframework.batch.core.job.Job;
+import org.springframework.batch.core.job.builder.FlowBuilder;
 import org.springframework.batch.core.job.builder.JobBuilder;
-import org.springframework.batch.core.job.parameters.JobParameters;
+import org.springframework.batch.core.job.flow.support.SimpleFlow;
+import org.springframework.batch.core.job.parameters.DefaultJobParametersValidator;
+import org.springframework.batch.core.job.parameters.JobParametersValidator;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.Step;
 import org.springframework.batch.core.step.builder.StepBuilder;
@@ -22,17 +26,96 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.task.SimpleAsyncTaskExecutor;
 import org.springframework.transaction.PlatformTransactionManager;
 
 import java.util.List;
+import java.util.concurrent.Flow;
+
 
 @Configuration
 public class ImportFlowJobConfig {
+
     @Bean
-    public Job importProduitsJob(JobRepository jobRepository, Step importProduitsStep, Step ecrireRejetsStep) {
-        return new JobBuilder("importProduitsJob", jobRepository).start(importProduitsStep).next(ecrireRejetsStep).build();
+    public JobParametersValidator parametersValidator() {
+        DefaultJobParametersValidator validator = new DefaultJobParametersValidator();
+        validator.setRequiredKeys(new String[]{"fichier", "date"});
+        validator.setOptionalKeys(new String[]{"fournisseur"});
+        return validator;
     }
 
+    @Bean
+    public Step alerteQualiteStep(JobRepository jobRepository, PlatformTransactionManager transactionManager) {
+        return new StepBuilder("alerteQualiteStep", jobRepository)
+                .tasklet((contribution, chunkContext) -> {
+
+                    System.out.println("ALERTE TAUX DE REJET SUPERIEUR AU SEUIL, VERIFIEZ L QUALITE DU FICHIER SOURCE");
+                    return RepeatStatus.FINISHED;
+                }, transactionManager).build();
+    }
+
+
+    @Bean
+    public Job importProduitsJob(JobRepository jobRepository,
+                                 Step importProduitsStep,
+                                 Step ecrireRejetsStep,
+                                 Step alerteQualiteStep,
+                                 Flow stocksEtCommandesFlow,
+                                 JobParametersValidator parametersValidator,
+                                 ImportFlowJobListener jobListener) {
+        return new JobBuilder("importProduitsJob", jobRepository)
+                //                .preventRestart() // JobResterException // bloque le redémarragfe après un échec
+                // JobInstanceAlreadyCompleteException // bloque une nouvelle eécution après un succès
+//                .validator(parametersValidator)
+                .listener(jobListener)
+                .start(importProduitsStep)
+//                    .on("QUALITE_INSUFFISANTE").to(alerteQualiteStep)
+//                    .on("COMPLETED").to(ecrireRejetsStep)
+//                .from(alerteQualiteStep)
+//                    .on("*").to(ecrireRejetsStep)
+////                .from(importStockStep)
+////                    .on("*").to(ecrireRejetsStep)
+//                .from(ecrireRejetsStep)
+//                .on("*").end()
+//                .end()
+////                .next(ecrireRejetsStep)
+
+                .build();
+    }
+
+    @Bean
+    public Step importStocksStep(JobRepository jobRepository,
+                                 PlatformTransactionManager transactionManager,
+                                 FlatFileItemReader<StockCsv> stockItemReader,
+                                 JdbcBatchItemWriter<StockCsv> stockItemWriter) {
+        return new StepBuilder("importStocksStep", jobRepository)
+                .<StockCsv, StockCsv>chunk(10)
+                .transactionManager(transactionManager)
+                .reader(stockItemReader)
+                .writer(stockItemWriter)
+                .build();
+    }
+
+    @Bean
+    public Step importCommandesStep(JobRepository jobRepository,
+                                    PlatformTransactionManager transactionManager) {
+        return new StepBuilder("importCommandesStep", jobRepository)
+                .tasklet((contribution, chunkContext) -> {
+                    System.out.println("Import des commandes (simulé)");
+                    return RepeatStatus.FINISHED;
+                }, transactionManager)
+                .build();
+    }
+
+    @Bean public SimpleFlow stocksEtCommandesFlow   (Step importStockStep, Step importCommandesStep) {
+
+        return new FlowBuilder<SimpleFlow>("stockEtCommandesFlow")
+                .split(new SimpleAsyncTaskExecutor())
+                .add(
+                        new FlowBuilder<SimpleFlow>("stocksFlow").start(importStockStep).build(),
+                        new FlowBuilder<SimpleFlow>("commandesFlow").start(importCommandesStep).build()
+                ).build();
+    }
     @Bean // step de type tasklet (exécute une action unique)
     public Step loggerStep(JobRepository jobRepository, PlatformTransactionManager transactionManager) {
         return new StepBuilder("loggerStep", jobRepository).tasklet((contribution, chunkContext) -> {
@@ -49,6 +132,7 @@ public class ImportFlowJobConfig {
         return new FlatFileItemReaderBuilder<ProduitCsv>()
                 .name("produitItemReader")
                 .resource(new ClassPathResource("produits.csv"))
+
                 .delimited()
                 .delimiter(",")
                 .names("reference", "designation", "prix", "stock")
@@ -90,7 +174,7 @@ public class ImportFlowJobConfig {
                                  PlatformTransactionManager transactionManager,
                                  FlatFileItemWriter<ProduitCsv> rejetItemWriter,
                                  RejetCollector rejetCollector
-                                 ){
+    ) {
         return new StepBuilder("ecrireRejetsStep", jobRepository).tasklet((contribution, chunkContext) -> {
             List<ProduitCsv> rejets = rejetCollector.getRejets();
             if (!rejets.isEmpty()) {
@@ -106,21 +190,30 @@ public class ImportFlowJobConfig {
     }
 
 
-
     @Bean
     public Step importProduitsStep(JobRepository jobRepository,
                                    PlatformTransactionManager transactionManager,
                                    FlatFileItemReader<ProduitCsv> produitItemReader,
                                    ProduitItemProcessor produitItemProcessor,
-                                   JdbcBatchItemWriter<Produit> produitItemWriter) {
+                                   JdbcBatchItemWriter<Produit> produitItemWriter,
+                                   ImportStepListener stepListener,
+                                   ProgressChunkListener progressChunkListener,
+                                   ProduitItemReadListener produitItemReadListener, QualiteImportListener qualiteImportListener) {
         return new StepBuilder("importProduitsStep", jobRepository)
                 .<ProduitCsv, Produit>chunk(10)
                 .transactionManager(transactionManager)
                 .reader(produitItemReader)
                 .processor(produitItemProcessor)
                 .writer(produitItemWriter)
+                .listener(stepListener)
+                .listener(produitItemReadListener)
+                .listener(progressChunkListener)
+                .listener((Object) produitItemProcessor)
+                .listener(qualiteImportListener)
                 .build();
     }
+
+
 
 
 }
