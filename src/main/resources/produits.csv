@@ -1,0 +1,7 @@
+-- src/main/resources/produits.csv
+reference,designation,prix,stock
+REF-001,Clavier mécanique,89.99,150
+REF-002,Souris ergonomique,45.00,320
+REF-003,Écran 27 pouces,349.99,45
+REF-004,Casque audio,-15.00,0
+REF-005,Webcam HD,79.90,210
